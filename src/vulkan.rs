@@ -7,19 +7,23 @@ use vulkano::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
         PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents,
     },
+    descriptor_set::{self, PersistentDescriptorSet},
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
     },
-    image::{view::ImageView, SwapchainImage},
+    format::{ClearValue, Format},
+    image::{view::ImageView, AttachmentImage, SwapchainImage},
     instance::{Instance, InstanceCreateInfo},
     pipeline::{
         graphics::{
+            depth_stencil::DepthStencilState,
             input_assembly::InputAssemblyState,
+            rasterization::{CullMode, RasterizationState},
             vertex_input::Vertex,
             viewport::{Viewport, ViewportState},
         },
-        GraphicsPipeline,
+        GraphicsPipeline, Pipeline,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     shader::ShaderModule,
@@ -27,7 +31,7 @@ use vulkano::{
     VulkanLibrary,
 };
 
-pub fn get_instance() -> Arc<Instance> {
+pub fn create_new_vulkano_instance() -> Arc<Instance> {
     let library = VulkanLibrary::new().expect("Failed to load vulkan library");
     let required_extensions = vulkano_win::required_extensions(&library);
 
@@ -41,74 +45,47 @@ pub fn get_instance() -> Arc<Instance> {
     .expect("Unable to fetch Vulkan Instance.");
 }
 
-pub fn select_physical_device(
-    instance: &Arc<Instance>,
-    surface: &Arc<Surface>,
-    device_extensions: &DeviceExtensions,
-) -> (Arc<PhysicalDevice>, u32) {
-    instance
-        .enumerate_physical_devices()
-        .expect("Failed to enumerate physical devices")
-        .filter(|p| p.supported_extensions().contains(&device_extensions))
-        .filter_map(|p| {
-            p.queue_family_properties()
-                .iter()
-                .enumerate()
-                .position(|(i, q)| {
-                    q.queue_flags.contains(QueueFlags::GRAPHICS)
-                        && p.surface_support(i as u32, &surface).unwrap_or(false)
-                })
-                .map(|q| (p, q as u32))
-        })
-        .min_by_key(|(p, _)| match p.properties().device_type {
-            PhysicalDeviceType::DiscreteGpu => 0,
-            PhysicalDeviceType::IntegratedGpu => 1,
-            PhysicalDeviceType::VirtualGpu => 2,
-            PhysicalDeviceType::Cpu => 3,
-            _ => 4,
-        })
-        .expect("No device found")
-}
-
-pub fn create_logical_device(
-    physical_device: &Arc<PhysicalDevice>,
-    extensions: DeviceExtensions,
-    queue_family_index: u32,
-) -> (Arc<Device>, impl ExactSizeIterator<Item = Arc<Queue>>) {
-    let (device, queues) = Device::new(
-        physical_device.clone(),
-        DeviceCreateInfo {
-            queue_create_infos: vec![QueueCreateInfo {
-                queue_family_index,
-                ..Default::default()
-            }],
-            enabled_extensions: extensions,
-            ..Default::default()
-        },
-    )
-    .expect("Failed to create device");
-
-    return (device, queues);
-}
-
-pub fn get_render_pass(
-    device: &Arc<Device>, // maybe not ref?
-    swapchain: &Arc<Swapchain>,
-) -> Arc<RenderPass> {
-    vulkano::single_pass_renderpass!(
+pub fn get_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain>) -> Arc<RenderPass> {
+    vulkano::ordered_passes_renderpass!(
         device.clone(),
         attachments: {
-            color: {
+            final_color: {
                 load: Clear,
                 store: Store,
                 format: swapchain.image_format(),
-                samples: 1
+                samples: 1,
             },
+            color: {
+                load: Clear,
+                store: DontCare,
+                format: Format::A2B10G10R10_UNORM_PACK32,
+                samples: 1,
+            },
+            normals: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16B16A16_SFLOAT,
+                samples: 1,
+            },
+            depth: {
+                load: Clear,
+                store: DontCare,
+                format: Format::D16_UNORM,
+                samples: 1
+            }
         },
-        pass: {
-            color: [color],
-            depth_stencil: {}
-        }
+        passes: [
+            {
+                color: [ color, normals ],
+                depth_stencil: { depth },
+                input: [],
+            },
+            {
+                color: [ final_color ],
+                depth_stencil: {},
+                input: [ color, normals ],
+            }
+        ]
     )
     .unwrap()
 }
@@ -116,6 +93,9 @@ pub fn get_render_pass(
 pub fn gen_framebuffers(
     images: &[Arc<SwapchainImage>],
     render_pass: &Arc<RenderPass>,
+    depth_buffer: &Arc<ImageView<AttachmentImage>>,
+    colour_buffer: &Arc<ImageView<AttachmentImage>>,
+    normal_buffer: &Arc<ImageView<AttachmentImage>>,
 ) -> Vec<Arc<Framebuffer>> {
     images
         .iter()
@@ -124,7 +104,12 @@ pub fn gen_framebuffers(
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![view],
+                    attachments: vec![
+                        view,
+                        colour_buffer.clone(),
+                        normal_buffer.clone(),
+                        depth_buffer.clone(),
+                    ],
                     ..Default::default()
                 },
             )
@@ -133,58 +118,41 @@ pub fn gen_framebuffers(
         .collect::<Vec<_>>()
 }
 
-pub fn get_pipeline(
+pub fn build_deferred_pipeline(
     device: Arc<Device>,
-    vs: Arc<ShaderModule>,
-    fs: Arc<ShaderModule>,
-    render_pass: Arc<RenderPass>,
+    deferred_vert_shader: Arc<ShaderModule>,
+    deferred_frag_shader: Arc<ShaderModule>,
+    deferred_render_pass: Subpass,
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
         .vertex_input_state(Vert::per_vertex())
-        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .vertex_shader(deferred_vert_shader.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
-        .fragment_shader(fs.entry_point("main").unwrap(), ())
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .fragment_shader(deferred_frag_shader.entry_point("main").unwrap(), ())
+        .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(deferred_render_pass)
         .build(device.clone())
         .unwrap()
 }
 
-pub fn get_command_buffers(
-    allocator: &StandardCommandBufferAllocator,
-    queue: &Arc<Queue>,
-    pipeline: &Arc<GraphicsPipeline>,
-    framebuffers: &Vec<Arc<Framebuffer>>,
-    vertex_buffer: &Subbuffer<[Vert]>,
-) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
-    framebuffers
-        .iter()
-        .map(|framebuffer| {
-            let mut builder = AutoCommandBufferBuilder::primary(
-                allocator,
-                queue.queue_family_index(),
-                CommandBufferUsage::MultipleSubmit,
-            )
-            .unwrap();
-
-            builder
-                .begin_render_pass(
-                    RenderPassBeginInfo {
-                        clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
-                        ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                    },
-                    SubpassContents::Inline,
-                )
-                .unwrap()
-                .bind_pipeline_graphics(pipeline.clone())
-                .bind_vertex_buffers(0, vertex_buffer.clone())
-                .draw(vertex_buffer.len() as u32, 1, 0, 0)
-                .unwrap()
-                .end_render_pass()
-                .unwrap();
-
-            Arc::new(builder.build().unwrap())
-        })
-        .collect()
+pub fn build_lighting_pipeline(
+    device: Arc<Device>,
+    vert_s: Arc<ShaderModule>,
+    frag_s: Arc<ShaderModule>,
+    lighting_render_pass: Subpass,
+    viewport: Viewport,
+) -> Arc<GraphicsPipeline> {
+    GraphicsPipeline::start()
+        .vertex_input_state(Vert::per_vertex())
+        .vertex_shader(vert_s.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        .fragment_shader(frag_s.entry_point("main").unwrap(), ())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(lighting_render_pass)
+        .build(device.clone())
+        .unwrap()
 }
