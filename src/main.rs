@@ -1,6 +1,4 @@
-use nalgebra_glm::{
-    half_pi, identity, look_at, perspective, pi, rotate_normalized_axis, translate, vec3,
-};
+use nalgebra_glm::{half_pi, look_at, perspective, pi, rotate_normalized_axis, vec3};
 
 use std::{sync::Arc, time::Instant};
 use vulkano_win::VkSurfaceBuild;
@@ -23,7 +21,8 @@ use vulkano::{
         RenderPassBeginInfo, SubpassContents,
     },
     descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+        allocator::StandardDescriptorSetAllocator, DescriptorSetsCollection,
+        PersistentDescriptorSet, WriteDescriptorSet,
     },
     device::{
         physical::{PhysicalDevice, PhysicalDeviceType},
@@ -47,10 +46,13 @@ use vulkano::{
 
 use rs_vul::{
     lighting::{ambient::AmbientLight, directional::DirectionalLight},
-    mvp::MVP,
-    obj,
-    shaders::{deferred_frag, deferred_vert, lighting_frag, lighting_vert},
-    vertex::Vert,
+    model::Model,
+    obj_loader::DummyVertex,
+    shaders::{
+        ambient_frag, ambient_vert, deferred_frag, deferred_vert, directional_frag,
+        directional_vert,
+    },
+    vp::VP,
     vulkan::{
         build_deferred_pipeline, build_lighting_pipeline, create_new_vulkano_instance,
         gen_framebuffers, get_render_pass,
@@ -65,9 +67,6 @@ const UNCAPPED_FPS: bool = true;
 
 const NEAR_CLIP: f32 = 0.01;
 const FAR_CLIP: f32 = 100.0;
-
-const AMBIENT_LIGHT_INTENSITY: f32 = 0.2;
-const AMBIENT_LIGHT_COLOUR: [f32; 3] = [1.0, 1.0, 1.0];
 
 struct MainApplication {
     global_state: GlobalApplicationState,
@@ -89,6 +88,12 @@ struct ApplicationConstants {
 
     /// The extensions we want to make use of within Vulkan.
     default_vulkan_extensions: DeviceExtensions,
+
+    /// The default, global illumination light.
+    ambient_light: AmbientLight,
+
+    /// The start time of the application.
+    start_time: Instant,
 }
 
 impl MainApplication {
@@ -96,6 +101,12 @@ impl MainApplication {
     /// A standard Black colour for generic Clear Values.
     ///
     const GLOBAL_CLEAR_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+    ///
+    /// Colour and intensity of the global illumination light.
+    ///
+    const AMBIENT_LIGHT_INTENSITY: f32 = 0.2;
+    const AMBIENT_LIGHT_COLOUR: [f32; 3] = [1.0, 1.0, 1.0];
 
     ///
     /// Create a new MainApplication, including a Vulkan Instance and a winit EventLoop.
@@ -117,6 +128,11 @@ impl MainApplication {
                 khr_swapchain: true,
                 ..DeviceExtensions::empty()
             },
+            ambient_light: AmbientLight {
+                color: Self::AMBIENT_LIGHT_COLOUR,
+                intensity: Self::AMBIENT_LIGHT_INTENSITY,
+            },
+            start_time: Instant::now(),
         };
 
         MainApplication {
@@ -216,27 +232,76 @@ impl MainApplication {
     }
 
     ///
-    /// Build the CommandBuffer.
+    /// Get:
+    ///  - The Physical Device we want to use,
+    ///  - A logical Device representing the Physical Device,
+    ///  - A default Queue for our Device.
     ///
-    pub fn get_command_buffer(
+    fn get_devices(
+        &self,
+        surface: &Arc<Surface>,
+    ) -> (Arc<PhysicalDevice>, Arc<Device>, Arc<Queue>) {
+        let (physical_device, queue_family_index) = self.select_physical_device(&surface);
+
+        let (logical_device, mut queues) =
+            self.create_logical_device(&physical_device, queue_family_index);
+
+        let default_device_queue = queues.next().unwrap();
+
+        (physical_device, logical_device, default_device_queue)
+    }
+
+    ///
+    /// Build common, long-lived Allocators.
+    ///
+    fn build_standard_allocators(
+        &self,
+        device: &Arc<Device>,
+    ) -> (
+        Arc<GenericMemoryAllocator<Arc<FreeListAllocator>>>,
+        StandardDescriptorSetAllocator,
+        StandardCommandBufferAllocator,
+    ) {
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+
+        let command_buffer_allocator = StandardCommandBufferAllocator::new(
+            device.clone(),
+            StandardCommandBufferAllocatorCreateInfo::default(),
+        );
+
+        (
+            memory_allocator,
+            descriptor_set_allocator,
+            command_buffer_allocator,
+        )
+    }
+
+    ///
+    /// Create a new CommandBufferBuilder.
+    ///
+    pub fn create_command_builder(
         &self,
         allocator: &StandardCommandBufferAllocator,
         queue: &Arc<Queue>,
-        deferred_pipeline: &Arc<GraphicsPipeline>,
-        lighting_pipeline: &Arc<GraphicsPipeline>,
-        framebuffer: &Arc<Framebuffer>,
-        vertex_buffer: &Subbuffer<[Vert]>,
-        deferred_descriptor_set: &Arc<PersistentDescriptorSet>,
-        lighting_descriptor_set: &Arc<PersistentDescriptorSet>,
-    ) -> Arc<PrimaryAutoCommandBuffer> {
-        let mut builder = AutoCommandBufferBuilder::primary(
+    ) -> AutoCommandBufferBuilder<PrimaryAutoCommandBuffer> {
+        AutoCommandBufferBuilder::primary(
             allocator,
             queue.queue_family_index(),
-            // todo: we're creating and using this in the render loop, so kinda fine for OTS, but keep in mind.
             CommandBufferUsage::OneTimeSubmit,
         )
-        .unwrap();
+        .expect("Unable to create Command Buffer Builder!")
+    }
 
+    ///
+    ///
+    ///
+    pub fn attach_framebuffer_to_command_builder(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        framebuffer: &Arc<Framebuffer>,
+    ) {
         builder
             .begin_render_pass(
                 RenderPassBeginInfo {
@@ -245,32 +310,56 @@ impl MainApplication {
                 },
                 SubpassContents::Inline,
             )
-            .unwrap()
             // todo: try this out!
             //.set_viewport(0, [viewport.clone()])
-            .bind_pipeline_graphics(deferred_pipeline.clone())
+            .unwrap();
+    }
+
+    ///
+    ///
+    ///
+    pub fn bind_pipeline_to_command_builder<S>(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        pipeline: &Arc<GraphicsPipeline>,
+        descriptor_sets: S,
+    ) where
+        S: DescriptorSetsCollection,
+    {
+        builder
+            .bind_pipeline_graphics(pipeline.clone())
             .bind_descriptor_sets(
                 vulkano::pipeline::PipelineBindPoint::Graphics,
-                deferred_pipeline.layout().clone(),
+                pipeline.layout().clone(),
                 0,
-                deferred_descriptor_set.clone(),
-            )
+                descriptor_sets,
+            );
+    }
+
+    ///
+    ///
+    ///
+    pub fn draw_vertex_buffer_within_command_builer<T>(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        vertex_buffer: &Subbuffer<[T]>,
+    ) {
+        builder
             .bind_vertex_buffers(0, vertex_buffer.clone())
             .draw(vertex_buffer.len() as u32, 1, 0, 0)
-            .unwrap()
-            .next_subpass(SubpassContents::Inline)
-            .unwrap()
-            .bind_pipeline_graphics(lighting_pipeline.clone())
-            .bind_descriptor_sets(
-                vulkano::pipeline::PipelineBindPoint::Graphics,
-                lighting_pipeline.layout().clone(),
-                0,
-                lighting_descriptor_set.clone(),
-            )
-            .draw(vertex_buffer.len() as u32, 1, 0, 0)
-            .unwrap()
+            .expect("Failed to draw vertex buffer!");
+    }
+
+    ///
+    ///
+    ///
+    pub fn end_and_build_command_builder(
+        &self,
+        mut builder: AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> Arc<PrimaryAutoCommandBuffer> {
+        builder
             .end_render_pass()
-            .unwrap();
+            .expect("Failed to end Render Pass!");
 
         Arc::new(builder.build().unwrap())
     }
@@ -334,46 +423,34 @@ impl MainApplication {
     }
 
     ///
-    /// Build common, long-lived Allocators.
+    /// Given a DirectionalLight, generate a buffer containing the light information.
     ///
-    fn build_standard_allocators(
+    fn generate_directional_light_buffer(
         &self,
-        device: &Arc<Device>,
-    ) -> (
-        Arc<GenericMemoryAllocator<Arc<FreeListAllocator>>>,
-        StandardDescriptorSetAllocator,
-        StandardCommandBufferAllocator,
-    ) {
-        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        allocator: &SubbufferAllocator,
+        light: &DirectionalLight,
+    ) -> Subbuffer<directional_frag::DirectionalLight> {
+        let uniform_data = directional_frag::DirectionalLight {
+            position: light.position.into(),
+            colour: light.color.into(),
+        };
 
-        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+        let uniform_buffer: Subbuffer<directional_frag::DirectionalLight> =
+            allocator.allocate_sized().unwrap();
 
-        let command_buffer_allocator = StandardCommandBufferAllocator::new(
-            device.clone(),
-            StandardCommandBufferAllocatorCreateInfo::default(),
-        );
+        *uniform_buffer.write().unwrap() = uniform_data;
 
-        (
-            memory_allocator,
-            descriptor_set_allocator,
-            command_buffer_allocator,
-        )
+        uniform_buffer
     }
 
     ///
     /// The main entry point for our Application.
     ///
     pub fn run(self) {
-        // Initial setup: Create Devices, surface, Swapchain, etc.
         let event_loop = EventLoop::new();
 
         let (surface, window) = self.spawn_surface_and_window(&event_loop);
-
-        let (physical_device, queue_family_index) = self.select_physical_device(&surface);
-
-        let (device, mut queues) = self.create_logical_device(&physical_device, queue_family_index);
-
-        let default_device_queue = queues.next().unwrap();
+        let (physical_device, device, default_device_queue) = self.get_devices(&surface);
 
         let (mut swapchain, images) =
             self.build_swapchain(&physical_device, &window, &device, &surface);
@@ -384,34 +461,39 @@ impl MainApplication {
         // Create shaders
         let deferred_vert_s = deferred_vert::load(device.clone()).expect("Failed to compile VS");
         let deferred_frag_s = deferred_frag::load(device.clone()).expect("Failed to compile FS");
-        let lighting_vert_s = lighting_vert::load(device.clone()).expect("Failed to compile VS");
-        let lighting_frag_s = lighting_frag::load(device.clone()).expect("Failed to compile FS");
+
+        let directional_vert_s =
+            directional_vert::load(device.clone()).expect("Failed to compile VS");
+        let directional_frag_s =
+            directional_frag::load(device.clone()).expect("Failed to compile FS");
+
+        let ambient_vert_s = ambient_vert::load(device.clone()).expect("Failed to compile VS");
+        let ambient_frag_s = ambient_frag::load(device.clone()).expect("Failed to compile FS");
         println!("Built shaders.");
 
         // Uniforms
-        let mut mvp = MVP::new();
-        mvp.model = translate(&identity(), &vec3(0.0, 0.0, -2.0));
-        mvp.view = look_at(
+        let mut vp = VP::new();
+        vp.view = look_at(
             &vec3(0.0, 0.0, 0.1),
             &vec3(0.0, 0.0, 0.0),
             &vec3(0.0, 1.0, 0.0),
         );
 
-        let ambient_light = AmbientLight {
-            color: AMBIENT_LIGHT_COLOUR,
-            intensity: AMBIENT_LIGHT_INTENSITY,
-        };
+        // Calc Projection
+        let image_extent: [u32; 2] = window.inner_size().into();
+        let aspect_ratio = image_extent[0] as f32 / image_extent[1] as f32;
+        vp.projection = perspective(aspect_ratio, half_pi(), NEAR_CLIP, FAR_CLIP);
 
-        // testing a directional light:
-        let dir_light = DirectionalLight {
-            color: [1.0, 1.0, 1.0],
-            position: [-4.0, -4.0, 0.0, 1.0],
-        };
+        // todo: do I really need all these different allocators?
+        let vp_buffer_allocator: SubbufferAllocator = SubbufferAllocator::new(
+            memory_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+        );
 
-        // For rotating obj
-        let rotation_start = Instant::now();
-
-        let uniform_buffer_allocator: SubbufferAllocator = SubbufferAllocator::new(
+        let model_buffer_allocator: SubbufferAllocator = SubbufferAllocator::new(
             memory_allocator.clone(),
             SubbufferAllocatorCreateInfo {
                 buffer_usage: BufferUsage::UNIFORM_BUFFER,
@@ -436,7 +518,11 @@ impl MainApplication {
         );
 
         println!("Loading model...");
-        let obj_data = obj::load_model("resources/models/duck.obj");
+        let mut model = Model::new("resources/models/suzanne.obj")
+            .invert_winding_order(true)
+            .build();
+
+        model.translate(vec3(0.0, 0.0, -2.0));
 
         println!("Model loaded. Transforming to vertex buffer...");
         let vertex_buffer = Buffer::from_iter(
@@ -449,12 +535,26 @@ impl MainApplication {
                 usage: MemoryUsage::Upload,
                 ..Default::default()
             },
-            obj_data.verticies,
+            model.data().iter().cloned(),
+        )
+        .unwrap();
+
+        let dummy_vertex_buffer = Buffer::from_iter(
+            &memory_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+            DummyVertex::list().iter().cloned(),
         )
         .unwrap();
 
         println!("Getting render pass...");
-        let mut render_pass = get_render_pass(&device, &swapchain);
+        let render_pass = get_render_pass(&device, &swapchain);
 
         let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
         let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
@@ -468,7 +568,7 @@ impl MainApplication {
         )
         .unwrap();
 
-        let colour_buffer = ImageView::new_default(
+        let mut colour_buffer = ImageView::new_default(
             AttachmentImage::transient_input_attachment(
                 &memory_allocator,
                 image_dimensions,
@@ -478,7 +578,7 @@ impl MainApplication {
         )
         .unwrap();
 
-        let normal_buffer = ImageView::new_default(
+        let mut normal_buffer = ImageView::new_default(
             AttachmentImage::transient_input_attachment(
                 &memory_allocator,
                 image_dimensions,
@@ -512,20 +612,45 @@ impl MainApplication {
             viewport.clone(),
         );
 
-        println!("Getting Lighting pipeline...");
-        let mut lighting_pipeline = build_lighting_pipeline(
+        println!("Getting Lighting pipelines...");
+        let mut directional_lighting_pipeline = build_lighting_pipeline(
             device.clone(),
-            lighting_vert_s.clone(),
-            lighting_frag_s.clone(),
-            lighting_pass,
+            directional_vert_s.clone(),
+            directional_frag_s.clone(),
+            lighting_pass.clone(),
             viewport.clone(),
         );
 
-        let mut image_extent: [u32; 2] = window.inner_size().into();
-        let mut aspect_ratio = image_extent[0] as f32 / image_extent[1] as f32;
+        let mut ambient_lighting_pipeline = build_lighting_pipeline(
+            device.clone(),
+            ambient_vert_s.clone(),
+            ambient_frag_s.clone(),
+            lighting_pass.clone(),
+            viewport.clone(),
+        );
 
-        // Calc Projection
-        mvp.projection = perspective(aspect_ratio, half_pi(), NEAR_CLIP, FAR_CLIP);
+        let vp_subbuffer = {
+            let uniform_data = deferred_vert::VPData {
+                view: vp.view.into(),
+                proj: vp.projection.into(),
+            };
+
+            let uniform_buffer: Subbuffer<deferred_vert::VPData> =
+                vp_buffer_allocator.allocate_sized().unwrap();
+
+            *uniform_buffer.write().unwrap() = uniform_data;
+
+            uniform_buffer
+        };
+
+        let vp_layout = deferred_pipeline.layout().set_layouts().get(0).unwrap();
+
+        let mut vp_descriptor_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            vp_layout.clone(),
+            [WriteDescriptorSet::buffer(0, vp_subbuffer.clone())],
+        )
+        .unwrap();
 
         let mut window_resized = false;
         let mut recreate_swapchain = false;
@@ -554,8 +679,6 @@ impl MainApplication {
                 Event::RedrawEventsCleared => {
                     if recreate_swapchain {
                         recreate_swapchain = false;
-                        println!("Recrating swapchain...");
-
                         let new_dimensions = window.inner_size();
 
                         let (new_swapchain, new_images) =
@@ -572,9 +695,8 @@ impl MainApplication {
 
                         swapchain = new_swapchain;
 
-                        render_pass = get_render_pass(&device, &swapchain);
+                        let new_render_pass = get_render_pass(&device, &swapchain);
 
-                        // todo: all these buffers are duplicated above
                         let new_depth_dimensions = new_images[0].dimensions().width_height();
                         let new_depth_buffer = ImageView::new_default(
                             AttachmentImage::transient(
@@ -586,8 +708,7 @@ impl MainApplication {
                         )
                         .unwrap();
 
-                        //todo: should this be default? tut said 'new'
-                        let new_colour_buffer = ImageView::new_default(
+                        colour_buffer = ImageView::new_default(
                             AttachmentImage::transient_input_attachment(
                                 &memory_allocator,
                                 new_depth_dimensions,
@@ -597,8 +718,7 @@ impl MainApplication {
                         )
                         .unwrap();
 
-                        //todo: same here
-                        let new_normal_buffer = ImageView::new_default(
+                        normal_buffer = ImageView::new_default(
                             AttachmentImage::transient_input_attachment(
                                 &memory_allocator,
                                 new_depth_dimensions,
@@ -610,10 +730,10 @@ impl MainApplication {
 
                         framebuffers = gen_framebuffers(
                             &new_images,
-                            &render_pass,
+                            &new_render_pass,
                             &new_depth_buffer,
-                            &new_colour_buffer,
-                            &new_normal_buffer,
+                            &colour_buffer,
+                            &normal_buffer,
                         );
 
                         if window_resized {
@@ -621,16 +741,41 @@ impl MainApplication {
                             println!("Window resized. Recrating pipeline...");
 
                             viewport.dimensions = new_dimensions.into();
-                            // todo; warnings?
-                            image_extent = window.inner_size().into();
-                            aspect_ratio = image_extent[0] as f32 / image_extent[1] as f32;
+                            let image_extent: [u32; 2] = new_dimensions.into();
+                            let aspect_ratio = image_extent[0] as f32 / image_extent[1] as f32;
 
                             // Calc Projection
-                            mvp.projection =
+                            vp.projection =
                                 perspective(aspect_ratio, half_pi(), NEAR_CLIP, FAR_CLIP);
 
+                            let new_vp_subbuffer = {
+                                let uniform_data = deferred_vert::VPData {
+                                    view: vp.view.into(),
+                                    proj: vp.projection.into(),
+                                };
+
+                                let uniform_buffer: Subbuffer<deferred_vert::VPData> =
+                                    vp_buffer_allocator.allocate_sized().unwrap();
+
+                                *uniform_buffer.write().unwrap() = uniform_data;
+
+                                uniform_buffer
+                            };
+
+                            let new_vp_layout =
+                                deferred_pipeline.layout().set_layouts().get(0).unwrap();
+
+                            vp_descriptor_set = PersistentDescriptorSet::new(
+                                &descriptor_set_allocator,
+                                new_vp_layout.clone(),
+                                [WriteDescriptorSet::buffer(0, new_vp_subbuffer.clone())],
+                            )
+                            .unwrap();
+
+                            // todo: these following pipelines, do they need to be re-created??
+
                             // todo: redefining deferred pass here, bit shit
-                            let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
+                            let deferred_pass = Subpass::from(new_render_pass.clone(), 0).unwrap();
                             deferred_pipeline = build_deferred_pipeline(
                                 device.clone(),
                                 deferred_vert_s.clone(),
@@ -640,12 +785,20 @@ impl MainApplication {
                             );
 
                             // todo: redefining lighting pass here, bit shit
-                            let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
-                            lighting_pipeline = build_lighting_pipeline(
+                            let lighting_pass = Subpass::from(new_render_pass.clone(), 1).unwrap();
+                            directional_lighting_pipeline = build_lighting_pipeline(
                                 device.clone(),
-                                lighting_vert_s.clone(),
-                                lighting_frag_s.clone(),
-                                lighting_pass,
+                                directional_vert_s.clone(),
+                                directional_frag_s.clone(),
+                                lighting_pass.clone(),
+                                viewport.clone(),
+                            );
+
+                            ambient_lighting_pipeline = build_lighting_pipeline(
+                                device.clone(),
+                                ambient_vert_s.clone(),
+                                ambient_frag_s.clone(),
+                                lighting_pass.clone(),
                                 viewport.clone(),
                             );
                         }
@@ -661,46 +814,50 @@ impl MainApplication {
                             Err(e) => panic!("Failed to acquire next image: {e}"),
                         };
 
-                    // Write to our uniform buffers - this largely controls the rotation of the duck.
-                    let uniform_buffer_subbuffer = {
-                        // Calc Model Matrix
-                        let elapsed = rotation_start.elapsed().as_secs() as f64
-                            + rotation_start.elapsed().subsec_nanos() as f64 / 1_000_000_000.0;
-                        let elapsed_as_radians = elapsed * pi::<f64>() / 180.0 * 30.0;
-                        let model = rotate_normalized_axis(
-                            &mvp.model,
-                            elapsed_as_radians as f32,
-                            &vec3(1.0, 0.0, 0.0),
-                        );
+                    let model_subbuffer = {
+                        let elapsed = self.constants.start_time.elapsed().as_secs() as f64
+                            + self.constants.start_time.elapsed().subsec_nanos() as f64
+                                / 1_000_000_000.0;
 
-                        let double_rotate = rotate_normalized_axis(
-                            &model,
-                            elapsed_as_radians as f32,
-                            &vec3(0.0, 1.0, 0.0),
-                        );
+                        let elapsed_as_radians = elapsed * pi::<f64>() / 180.0;
 
-                        let uniform_data = deferred_vert::UniformBufferObject {
-                            model: double_rotate.into(),
-                            view: (mvp.view).into(),
-                            proj: mvp.projection.into(),
+                        model.zero_rotation();
+                        model.rotate(pi(), vec3(0.0, 1.0, 0.0));
+                        model.rotate(elapsed_as_radians as f32 * 50.0, vec3(0.0, 0.0, 1.0));
+                        model.rotate(elapsed_as_radians as f32 * 30.0, vec3(0.0, 1.0, 0.0));
+                        model.rotate(elapsed_as_radians as f32 * 20.0, vec3(1.0, 0.0, 0.0));
+
+                        let (model_mat, normal_mat) = model.model_matrices();
+
+                        let uniform_data = deferred_vert::ModelData {
+                            model: model_mat.into(),
+                            normals: normal_mat.into(),
                         };
 
-                        // Write Uniform Buffers
-                        let uniform_buffer: Subbuffer<deferred_vert::UniformBufferObject> =
-                            uniform_buffer_allocator.allocate_sized().unwrap();
+                        let uniform_buffer: Subbuffer<deferred_vert::ModelData> =
+                            model_buffer_allocator.allocate_sized().unwrap();
 
                         *uniform_buffer.write().unwrap() = uniform_data;
 
                         uniform_buffer
                     };
 
+                    let model_layout = deferred_pipeline.layout().set_layouts().get(1).unwrap();
+
+                    let model_descriptor_set = PersistentDescriptorSet::new(
+                        &descriptor_set_allocator,
+                        model_layout.clone(),
+                        [WriteDescriptorSet::buffer(0, model_subbuffer.clone())],
+                    )
+                    .unwrap();
+
                     let ambient_light_subbuffer = {
-                        let uniform_data = lighting_frag::AmbientLight {
-                            colour: ambient_light.color.into(),
-                            intensity: ambient_light.intensity.into(),
+                        let uniform_data = ambient_frag::AmbientLight {
+                            color: self.constants.ambient_light.color.into(),
+                            intensity: self.constants.ambient_light.intensity.into(),
                         };
 
-                        let uniform_buffer: Subbuffer<lighting_frag::AmbientLight> =
+                        let uniform_buffer: Subbuffer<ambient_frag::AmbientLight> =
                             ambient_buffer_allocator.allocate_sized().unwrap();
 
                         *uniform_buffer.write().unwrap() = uniform_data;
@@ -708,59 +865,183 @@ impl MainApplication {
                         uniform_buffer
                     };
 
-                    let directional_light_subbuffer = {
-                        let uniform_data = lighting_frag::DirectionalLight {
-                            position: dir_light.position.into(),
-                            colour: dir_light.color.into(),
-                        };
-
-                        let uniform_buffer: Subbuffer<lighting_frag::DirectionalLight> =
-                            directional_buffer_allocator.allocate_sized().unwrap();
-
-                        *uniform_buffer.write().unwrap() = uniform_data;
-
-                        uniform_buffer
+                    let red_light = DirectionalLight {
+                        position: [-4.0, 0.0, -4.0, 1.0],
+                        color: [1.0, 0.0, 0.0],
                     };
 
-                    let deferred_layout = deferred_pipeline.layout().set_layouts().get(0).unwrap();
+                    let directional_light_subbuffer_r = self.generate_directional_light_buffer(
+                        &directional_buffer_allocator,
+                        &red_light,
+                    );
 
-                    let deferred_descriptor_set = PersistentDescriptorSet::new(
+                    let green_light = DirectionalLight {
+                        position: [0.0, -4.0, 1.0, 1.0],
+                        color: [0.0, 1.0, 0.0],
+                    };
+
+                    let directional_light_subbuffer_g = self.generate_directional_light_buffer(
+                        &directional_buffer_allocator,
+                        &green_light,
+                    );
+
+                    let blue_light = DirectionalLight {
+                        position: [4.0, -2.0, 1.0, 1.0],
+                        color: [0.0, 0.0, 1.0],
+                    };
+
+                    let directional_light_subbuffer_b = self.generate_directional_light_buffer(
+                        &directional_buffer_allocator,
+                        &blue_light,
+                    );
+
+                    let ambient_lighting_layout = ambient_lighting_pipeline
+                        .layout()
+                        .set_layouts()
+                        .get(0)
+                        .unwrap();
+
+                    let ambient_lighting_descriptor_set = PersistentDescriptorSet::new(
                         &descriptor_set_allocator,
-                        deferred_layout.clone(),
-                        [WriteDescriptorSet::buffer(
-                            0,
-                            uniform_buffer_subbuffer.clone(),
-                        )],
+                        ambient_lighting_layout.clone(),
+                        [
+                            // register all bindings for shader uniform buffers
+                            // index param == binding value in shader -
+                            WriteDescriptorSet::image_view(0, colour_buffer.clone()),
+                            WriteDescriptorSet::buffer(1, ambient_light_subbuffer.clone()),
+                        ],
                     )
                     .unwrap();
 
-                    let lighting_layout = lighting_pipeline.layout().set_layouts().get(0).unwrap();
+                    // Only need this once for all directional lights
+                    let directional_lighting_layout = directional_lighting_pipeline
+                        .layout()
+                        .set_layouts()
+                        .get(0)
+                        .unwrap();
 
-                    let lighting_descriptor_set = PersistentDescriptorSet::new(
+                    // RED LIGHT
+                    let directional_lighting_descriptor_set_r = PersistentDescriptorSet::new(
                         &descriptor_set_allocator,
-                        lighting_layout.clone(),
+                        directional_lighting_layout.clone(),
                         [
                             // register all bindings for shader uniform buffers
                             // index param == binding value in shader
                             WriteDescriptorSet::image_view(0, colour_buffer.clone()),
                             WriteDescriptorSet::image_view(1, normal_buffer.clone()),
-                            WriteDescriptorSet::buffer(2, uniform_buffer_subbuffer),
-                            WriteDescriptorSet::buffer(3, ambient_light_subbuffer),
-                            WriteDescriptorSet::buffer(4, directional_light_subbuffer),
+                            WriteDescriptorSet::buffer(2, directional_light_subbuffer_r.clone()),
                         ],
                     )
                     .unwrap();
 
-                    let command_buffer = self.get_command_buffer(
-                        &command_buffer_allocator,
-                        &default_device_queue,
-                        &deferred_pipeline,
-                        &lighting_pipeline,
-                        &framebuffers[image_index as usize],
-                        &vertex_buffer,
-                        &deferred_descriptor_set,
-                        &lighting_descriptor_set,
-                    );
+                    // GREEN LIGHT
+                    let directional_lighting_descriptor_set_g = PersistentDescriptorSet::new(
+                        &descriptor_set_allocator,
+                        directional_lighting_layout.clone(),
+                        [
+                            // register all bindings for shader uniform buffers
+                            // index param == binding value in shader
+                            WriteDescriptorSet::image_view(0, colour_buffer.clone()),
+                            WriteDescriptorSet::image_view(1, normal_buffer.clone()),
+                            WriteDescriptorSet::buffer(2, directional_light_subbuffer_g.clone()),
+                        ],
+                    )
+                    .unwrap();
+
+                    // BLUE LIGHT
+                    let directional_lighting_descriptor_set_b = PersistentDescriptorSet::new(
+                        &descriptor_set_allocator,
+                        directional_lighting_layout.clone(),
+                        [
+                            // register all bindings for shader uniform buffers
+                            // index param == binding value in shader
+                            WriteDescriptorSet::image_view(0, colour_buffer.clone()),
+                            WriteDescriptorSet::image_view(1, normal_buffer.clone()),
+                            WriteDescriptorSet::buffer(2, directional_light_subbuffer_b.clone()),
+                        ],
+                    )
+                    .unwrap();
+
+                    // Build Command Buffer!
+                    let command_buffer = {
+                        let mut builder = self.create_command_builder(
+                            &command_buffer_allocator,
+                            &default_device_queue,
+                        );
+
+                        self.attach_framebuffer_to_command_builder(
+                            &mut builder,
+                            &framebuffers[image_index as usize],
+                        );
+
+                        // Deferred Pipeline
+                        self.bind_pipeline_to_command_builder(
+                            &mut builder,
+                            &deferred_pipeline,
+                            (vp_descriptor_set.clone(), model_descriptor_set.clone()),
+                        );
+
+                        self.draw_vertex_buffer_within_command_builer(&mut builder, &vertex_buffer);
+
+                        // Finish Deferred Subpass, Start Lighting Subpass
+                        // Note: all lighting steps occur on the same subpass, so we don't
+                        //       call this again after each lighting pipeline.
+                        builder.next_subpass(SubpassContents::Inline).unwrap();
+
+                        // Directional Lighting - RED
+                        self.bind_pipeline_to_command_builder(
+                            &mut builder,
+                            &directional_lighting_pipeline,
+                            directional_lighting_descriptor_set_r.clone(),
+                        );
+
+                        // We need to draw the dummy vertex buffer so the lighting
+                        // pass only applies once to every pixel on the image.
+                        // Otherwise, overlapping and backfacing faces will be lit
+                        // and lead to an odd transparent look to complex objects.
+                        self.draw_vertex_buffer_within_command_builer(
+                            &mut builder,
+                            &dummy_vertex_buffer,
+                        );
+
+                        // Directional Lighting - GREEN
+                        self.bind_pipeline_to_command_builder(
+                            &mut builder,
+                            &directional_lighting_pipeline,
+                            directional_lighting_descriptor_set_g.clone(),
+                        );
+
+                        self.draw_vertex_buffer_within_command_builer(
+                            &mut builder,
+                            &dummy_vertex_buffer,
+                        );
+
+                        // Directional Lighting - BLUE
+                        self.bind_pipeline_to_command_builder(
+                            &mut builder,
+                            &directional_lighting_pipeline,
+                            directional_lighting_descriptor_set_b.clone(),
+                        );
+
+                        self.draw_vertex_buffer_within_command_builer(
+                            &mut builder,
+                            &dummy_vertex_buffer,
+                        );
+
+                        // Ambient Lighting
+                        self.bind_pipeline_to_command_builder(
+                            &mut builder,
+                            &ambient_lighting_pipeline,
+                            ambient_lighting_descriptor_set.clone(),
+                        );
+
+                        self.draw_vertex_buffer_within_command_builer(
+                            &mut builder,
+                            &dummy_vertex_buffer,
+                        );
+
+                        self.end_and_build_command_builder(builder)
+                    };
 
                     if suboptimal {
                         println!("Suboptimal Swapchain. Recreate next frame.");

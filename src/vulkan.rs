@@ -1,35 +1,28 @@
-use crate::vertex::Vert;
 use std::sync::Arc;
 
 use vulkano::{
-    buffer::Subbuffer,
-    command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
-        PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents,
-    },
-    descriptor_set::{self, PersistentDescriptorSet},
-    device::{
-        physical::{PhysicalDevice, PhysicalDeviceType},
-        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
-    },
-    format::{ClearValue, Format},
+    device::Device,
+    format::Format,
     image::{view::ImageView, AttachmentImage, SwapchainImage},
     instance::{Instance, InstanceCreateInfo},
     pipeline::{
         graphics::{
+            color_blend::{AttachmentBlend, BlendFactor, BlendOp, ColorBlendState},
             depth_stencil::DepthStencilState,
             input_assembly::InputAssemblyState,
             rasterization::{CullMode, RasterizationState},
             vertex_input::Vertex,
             viewport::{Viewport, ViewportState},
         },
-        GraphicsPipeline, Pipeline,
+        GraphicsPipeline,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     shader::ShaderModule,
-    swapchain::{Surface, Swapchain},
+    swapchain::Swapchain,
     VulkanLibrary,
 };
+
+use crate::obj_loader::{DummyVertex, Vert};
 
 pub fn create_new_vulkano_instance() -> Arc<Instance> {
     let library = VulkanLibrary::new().expect("Failed to load vulkan library");
@@ -146,11 +139,24 @@ pub fn build_lighting_pipeline(
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
-        .vertex_input_state(Vert::per_vertex())
+        .vertex_input_state(DummyVertex::per_vertex())
         .vertex_shader(vert_s.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
         .fragment_shader(frag_s.entry_point("main").unwrap(), ())
+        .color_blend_state(
+            ColorBlendState::new(lighting_render_pass.num_color_attachments()).blend(
+                AttachmentBlend {
+                    color_op: BlendOp::Add,
+                    color_source: BlendFactor::One,
+                    color_destination: BlendFactor::One,
+                    alpha_op: BlendOp::Max,
+                    alpha_source: BlendFactor::One,
+                    alpha_destination: BlendFactor::One,
+                },
+            ),
+        )
+        .depth_stencil_state(DepthStencilState::simple_depth_test()) // todo: is this needed?
         .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
         .render_pass(lighting_render_pass)
         .build(device.clone())

@@ -2,16 +2,14 @@ use nalgebra_glm::identity;
 use nalgebra_glm::TMat4;
 
 #[derive(Debug, Clone)]
-pub struct MVP {
-    pub model: TMat4<f32>,
+pub struct VP {
     pub view: TMat4<f32>,
     pub projection: TMat4<f32>,
 }
 
-impl MVP {
-    pub fn new() -> MVP {
-        MVP {
-            model: identity(),
+impl VP {
+    pub fn new() -> VP {
+        VP {
             view: identity(),
             projection: identity(),
         }
