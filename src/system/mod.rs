@@ -1,3 +1,8 @@
+pub mod lighting;
+pub mod model;
+pub mod obj_loader;
+pub mod shaders;
+
 use nalgebra_glm::identity;
 use nalgebra_glm::TMat4;
 

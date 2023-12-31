@@ -30,34 +30,172 @@ use vulkano::{
     },
     format::{ClearValue, Format},
     image::{view::ImageView, AttachmentImage, ImageAccess, ImageUsage, SwapchainImage},
-    instance::Instance,
+    instance::{Instance, InstanceCreateInfo},
     memory::allocator::{
         AllocationCreateInfo, FreeListAllocator, GenericMemoryAllocator, MemoryUsage,
         StandardMemoryAllocator,
     },
-    pipeline::{graphics::viewport::Viewport, GraphicsPipeline, Pipeline},
-    render_pass::{Framebuffer, Subpass},
+    pipeline::{
+        graphics::{
+            color_blend::{AttachmentBlend, BlendFactor, BlendOp, ColorBlendState},
+            depth_stencil::DepthStencilState,
+            input_assembly::InputAssemblyState,
+            rasterization::{CullMode, RasterizationState},
+            vertex_input::Vertex,
+            viewport::{Viewport, ViewportState},
+        },
+        GraphicsPipeline, Pipeline,
+    },
+    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+    shader::ShaderModule,
     swapchain::{
         self, AcquireError, PresentMode, Surface, Swapchain, SwapchainCreateInfo,
         SwapchainCreationError, SwapchainPresentInfo,
     },
     sync::{self, future::FenceSignalFuture, FlushError, GpuFuture},
+    VulkanLibrary,
 };
 
 use rs_vul::{
-    lighting::{ambient::AmbientLight, directional::DirectionalLight},
-    model::Model,
-    obj_loader::DummyVertex,
-    shaders::{
-        ambient_frag, ambient_vert, deferred_frag, deferred_vert, directional_frag,
-        directional_vert,
-    },
-    vp::VP,
-    vulkan::{
-        build_deferred_pipeline, build_lighting_pipeline, create_new_vulkano_instance,
-        gen_framebuffers, get_render_pass,
+    system::lighting::{ambient::AmbientLight, directional::DirectionalLight},
+    system::{model::Model, obj_loader::DummyVertex, VP},
+    system::{
+        obj_loader::Vert,
+        shaders::{
+            ambient_frag, ambient_vert, deferred_frag, deferred_vert, directional_frag,
+            directional_vert,
+        },
     },
 };
+
+// todo: Refactor
+pub fn get_render_pass(device: &Arc<Device>, swapchain: &Arc<Swapchain>) -> Arc<RenderPass> {
+    vulkano::ordered_passes_renderpass!(
+        device.clone(),
+        attachments: {
+            final_color: {
+                load: Clear,
+                store: Store,
+                format: swapchain.image_format(),
+                samples: 1,
+            },
+            color: {
+                load: Clear,
+                store: DontCare,
+                format: Format::A2B10G10R10_UNORM_PACK32,
+                samples: 1,
+            },
+            normals: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16B16A16_SFLOAT,
+                samples: 1,
+            },
+            depth: {
+                load: Clear,
+                store: DontCare,
+                format: Format::D16_UNORM,
+                samples: 1
+            }
+        },
+        passes: [
+            {
+                color: [ color, normals ],
+                depth_stencil: { depth },
+                input: [],
+            },
+            {
+                color: [ final_color ],
+                depth_stencil: {},
+                input: [ color, normals ],
+            }
+        ]
+    )
+    .unwrap()
+}
+
+// todo: Refactor
+pub fn gen_framebuffers(
+    images: &[Arc<SwapchainImage>],
+    render_pass: &Arc<RenderPass>,
+    depth_buffer: &Arc<ImageView<AttachmentImage>>,
+    colour_buffer: &Arc<ImageView<AttachmentImage>>,
+    normal_buffer: &Arc<ImageView<AttachmentImage>>,
+) -> Vec<Arc<Framebuffer>> {
+    images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone()).unwrap();
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![
+                        view,
+                        colour_buffer.clone(),
+                        normal_buffer.clone(),
+                        depth_buffer.clone(),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>()
+}
+
+// todo: Refactor
+pub fn build_deferred_pipeline(
+    device: Arc<Device>,
+    deferred_vert_shader: Arc<ShaderModule>,
+    deferred_frag_shader: Arc<ShaderModule>,
+    deferred_render_pass: Subpass,
+    viewport: Viewport,
+) -> Arc<GraphicsPipeline> {
+    GraphicsPipeline::start()
+        .vertex_input_state(Vert::per_vertex())
+        .vertex_shader(deferred_vert_shader.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        .fragment_shader(deferred_frag_shader.entry_point("main").unwrap(), ())
+        .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(deferred_render_pass)
+        .build(device.clone())
+        .unwrap()
+}
+
+// todo: Refactor
+pub fn build_lighting_pipeline(
+    device: Arc<Device>,
+    vert_s: Arc<ShaderModule>,
+    frag_s: Arc<ShaderModule>,
+    lighting_render_pass: Subpass,
+    viewport: Viewport,
+) -> Arc<GraphicsPipeline> {
+    GraphicsPipeline::start()
+        .vertex_input_state(DummyVertex::per_vertex())
+        .vertex_shader(vert_s.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        .fragment_shader(frag_s.entry_point("main").unwrap(), ())
+        .color_blend_state(
+            ColorBlendState::new(lighting_render_pass.num_color_attachments()).blend(
+                AttachmentBlend {
+                    color_op: BlendOp::Add,
+                    color_source: BlendFactor::One,
+                    color_destination: BlendFactor::One,
+                    alpha_op: BlendOp::Max,
+                    alpha_source: BlendFactor::One,
+                    alpha_destination: BlendFactor::One,
+                },
+            ),
+        )
+        .depth_stencil_state(DepthStencilState::simple_depth_test()) // todo: is this needed?
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(lighting_render_pass)
+        .build(device.clone())
+        .unwrap()
+}
 
 const TITLE: &str = "RS VUL";
 const WIDTH: u32 = 800;
@@ -113,9 +251,19 @@ impl MainApplication {
     /// This also initialises a lot of our constant values.
     ///
     pub fn new() -> Self {
-        let global_state = GlobalApplicationState {
-            instance: create_new_vulkano_instance(),
-        };
+        let library = VulkanLibrary::new().expect("Failed to load vulkan library");
+        let required_extensions = vulkano_win::required_extensions(&library);
+
+        let instance = Instance::new(
+            library,
+            InstanceCreateInfo {
+                enabled_extensions: required_extensions,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let global_state = GlobalApplicationState { instance };
 
         let constants = ApplicationConstants {
             clear_values: vec![
