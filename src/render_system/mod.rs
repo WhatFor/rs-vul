@@ -1,7 +1,6 @@
 pub mod lighting;
 pub mod model;
 pub mod obj_loader;
-pub mod shaders;
 pub mod vp;
 
 use nalgebra_glm::{half_pi, look_at, perspective, pi, vec3};
@@ -63,14 +62,12 @@ use vulkano::{
 };
 
 use crate::{
-    system::lighting::{ambient::AmbientLight, directional::DirectionalLight},
-    system::{model::Model, obj_loader::DummyVertex, vp::VP},
-    system::{
-        obj_loader::Vert,
-        shaders::{
-            ambient_frag, ambient_vert, deferred_frag, deferred_vert, directional_frag,
-            directional_vert,
-        },
+    render_system::lighting::{ambient::AmbientLight, directional::DirectionalLight},
+    render_system::obj_loader::Vert,
+    render_system::{model::Model, obj_loader::DummyVertex, vp::VP},
+    shaders::{
+        ambient_frag, ambient_vert, deferred_frag, deferred_vert, directional_frag,
+        directional_vert,
     },
 };
 
