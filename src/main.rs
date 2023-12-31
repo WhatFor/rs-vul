@@ -1,4 +1,4 @@
-use nalgebra_glm::{half_pi, look_at, perspective, pi, rotate_normalized_axis, vec3};
+use nalgebra_glm::{half_pi, look_at, perspective, pi, vec3};
 
 use std::{sync::Arc, time::Instant};
 use vulkano_win::VkSurfaceBuild;

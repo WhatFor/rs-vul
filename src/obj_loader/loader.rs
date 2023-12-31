@@ -8,8 +8,10 @@ pub struct Loader {
     color: [f32; 3],
     verts: Vec<RawVertex>,
     norms: Vec<RawVertex>,
+    #[allow(dead_code)] // todo: remove me
     text: Vec<RawVertex>,
     faces: Vec<RawFace>,
+    #[allow(dead_code)] // todo: remove me
     invert_winding_order: bool,
 }
 
