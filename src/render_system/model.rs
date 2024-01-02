@@ -1,10 +1,14 @@
-use super::obj_loader::{Loader, Vert};
+use super::obj_loader::{ColoredVertex, Loader, Vert};
 
-use nalgebra_glm::{identity, inverse_transpose, rotate_normalized_axis, translate, TMat4, TVec3};
+use nalgebra_glm::{
+    identity, inverse_transpose, rotate_normalized_axis, scale, translate, vec3, TMat4, TVec3,
+};
 
 pub struct Model {
     data: Vec<Vert>,
     translation: TMat4<f32>,
+    // todo: Support 3d scale
+    uniform_scale: f32,
     rotation: TMat4<f32>,
     model: TMat4<f32>,
     normals: TMat4<f32>,
@@ -13,6 +17,7 @@ pub struct Model {
 
 pub struct ModelBuilder {
     file_name: String,
+    scale_factor: f32,
     custom_color: [f32; 3],
     invert: bool,
 }
@@ -23,6 +28,7 @@ impl ModelBuilder {
             file_name: file,
             custom_color: [1.0, 0.35, 0.137],
             invert: true,
+            scale_factor: 1.,
         }
     }
 
@@ -31,6 +37,7 @@ impl ModelBuilder {
         Model {
             data: loader.as_normal_vertices(),
             translation: identity(),
+            uniform_scale: self.scale_factor,
             rotation: identity(),
             model: identity(),
             normals: identity(),
@@ -52,6 +59,11 @@ impl ModelBuilder {
         self.invert = invert;
         self
     }
+
+    pub fn uniform_scale_factor(mut self, scale: f32) -> ModelBuilder {
+        self.scale_factor = scale;
+        self
+    }
 }
 
 impl Model {
@@ -66,6 +78,12 @@ impl Model {
     pub fn model_matrices(&mut self) -> (TMat4<f32>, TMat4<f32>) {
         if self.requires_update {
             self.model = self.translation * self.rotation;
+
+            self.model = scale(
+                &self.model,
+                &vec3(self.uniform_scale, self.uniform_scale, self.uniform_scale),
+            );
+
             self.normals = inverse_transpose(self.model);
             self.requires_update = false;
         }
@@ -86,5 +104,16 @@ impl Model {
     pub fn zero_rotation(&mut self) {
         self.rotation = identity();
         self.requires_update = true;
+    }
+
+    pub fn color_data(&self) -> Vec<ColoredVertex> {
+        let mut ret: Vec<ColoredVertex> = Vec::new();
+        for v in &self.data {
+            ret.push(ColoredVertex {
+                position: v.position,
+                color: v.colour,
+            });
+        }
+        ret
     }
 }

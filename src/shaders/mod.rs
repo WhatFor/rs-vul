@@ -39,3 +39,17 @@ pub mod ambient_frag {
         path: "src/shaders/lighting/ambient.frag"
     }
 }
+
+pub mod light_obj_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/lighting/light_obj.vert"
+    }
+}
+
+pub mod light_obj_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/lighting/light_obj.frag"
+    }
+}
