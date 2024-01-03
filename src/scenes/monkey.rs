@@ -4,12 +4,14 @@ use crate::render_system::{self, lighting::directional::DirectionalLight, model:
 
 use super::Scene;
 
-pub struct MonkeyScene;
+pub struct MonkeyScene {
+    suzanne: Model,
+    light_1: DirectionalLight,
+    light_2: DirectionalLight,
+}
 
-impl Scene for MonkeyScene {
-    fn init(&self) {}
-
-    fn draw(&self, application: &mut render_system::RenderSystem) {
+impl MonkeyScene {
+    pub fn new() -> MonkeyScene {
         let mut suzanne = Model::new("resources/models/suzanne.obj")
             .invert_winding_order(true)
             .build();
@@ -27,9 +29,19 @@ impl Scene for MonkeyScene {
             position: [4.0, -4.0, 0.0, -2.0],
         };
 
-        application.add_geometry(&mut suzanne);
+        MonkeyScene {
+            suzanne,
+            light_1: directional_light_red,
+            light_2: directional_light_green,
+        }
+    }
+}
+
+impl Scene for MonkeyScene {
+    fn draw(&mut self, application: &mut render_system::RenderSystem) {
+        application.add_geometry(&mut self.suzanne);
         application.draw_ambient_light();
-        application.draw_directional_light(&directional_light_red);
-        application.draw_directional_light(&directional_light_green);
+        application.draw_directional_light(&self.light_1);
+        application.draw_directional_light(&self.light_2);
     }
 }

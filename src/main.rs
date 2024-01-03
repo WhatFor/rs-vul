@@ -3,7 +3,7 @@ use scenes::{monkey::MonkeyScene, teapot::TeapotScene, SceneManager};
 use vulkano::sync::GpuFuture;
 
 use winit::{
-    event::{Event, VirtualKeyCode, WindowEvent},
+    event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
 };
 
@@ -15,10 +15,10 @@ fn main() {
     let event_loop = EventLoop::new();
     let mut scene_man = SceneManager::new();
 
-    scene_man.add_scene(Box::new(MonkeyScene {}));
-    scene_man.add_scene(Box::new(TeapotScene {}));
+    scene_man.add_scene(Box::new(MonkeyScene::new()));
+    scene_man.add_scene(Box::new(TeapotScene::new()));
 
-    let (mut application, mut previous_frame_end) = render_system::RenderSystem::new(&event_loop);
+    let (mut sys, mut previous_frame_end) = render_system::RenderSystem::new(&event_loop);
 
     {
         event_loop.run(move |event, _, control_flow| match event {
@@ -32,28 +32,13 @@ fn main() {
                 event: WindowEvent::Resized(_),
                 ..
             } => {
-                application.recreate_swapchain();
+                sys.recreate_swapchain();
             }
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { input, .. },
                 ..
             } => {
-                if input.state != winit::event::ElementState::Pressed {
-                    return;
-                }
-
-                match input.virtual_keycode {
-                    Some(key) => match key {
-                        VirtualKeyCode::Key1 => {
-                            scene_man.set_active(0);
-                        }
-                        VirtualKeyCode::Key2 => {
-                            scene_man.set_active(1);
-                        }
-                        _ => {}
-                    },
-                    None => {}
-                }
+                scene_man.switch_scene_by_key(input);
             }
             Event::RedrawEventsCleared => {
                 previous_frame_end
@@ -92,7 +77,7 @@ fn main() {
                 // teapot.rotate(elapsed_as_radians * 20.0, vec3(1.0, 0.0, 0.0));
 
                 // Draw!
-                application.start_frame();
+                sys.start_frame();
 
                 // application.add_geometry(&mut suzanne);
                 // application.add_geometry(&mut teapot);
@@ -104,9 +89,9 @@ fn main() {
                 //application.draw_light_object(&spot_light);
 
                 let active_scene = scene_man.active_scene();
-                active_scene.draw(&mut application);
+                active_scene.draw(&mut sys);
 
-                application.finish_frame(&mut previous_frame_end);
+                sys.finish_frame(&mut previous_frame_end);
             }
             _ => (),
         });

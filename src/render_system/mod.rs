@@ -263,6 +263,9 @@ const NEAR_CLIP: f32 = 0.01;
 const FAR_CLIP: f32 = 100.0;
 
 pub struct RenderSystem {
+    pub constants: EngineConstants,
+    pub render_stage: RenderStage,
+
     instance: Arc<Instance>,
     window: Arc<Window>,
     surface: Arc<Surface>,
@@ -305,15 +308,12 @@ pub struct RenderSystem {
     vp: VP,
     vp_descriptor_set: Arc<PersistentDescriptorSet>,
 
-    constants: EngineConstants,
-
-    render_stage: RenderStage,
     commands: Option<AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>>,
     current_image_index: u32,
     acquire_future: Option<SwapchainAcquireFuture>,
 }
 
-struct EngineConstants {
+pub struct EngineConstants {
     /// For each attachment in our Render Pass that has a load operation of LoadOp::Clear,
     /// the clear values that should be used for the attachments in the framebuffer.
     /// There must be exactly framebuffer.attachments().len() elements provided,
@@ -328,7 +328,7 @@ struct EngineConstants {
 }
 
 #[derive(Debug, Clone)]
-enum RenderStage {
+pub enum RenderStage {
     Stopped,
     Deferred,
     Ambient,
