@@ -1,6 +1,6 @@
 use nalgebra_glm::vec3;
 
-use crate::render_system::{self, lighting::directional::DirectionalLight, model::Model};
+use crate::render_system::{lighting::directional::DirectionalLight, model::Model, RenderSystem};
 
 use super::Scene;
 
@@ -37,10 +37,10 @@ impl TeapotScene {
 }
 
 impl Scene for TeapotScene {
-    fn draw(&mut self, application: &mut render_system::RenderSystem) {
-        application.add_geometry(&mut self.teapot);
-        application.draw_ambient_light();
-        application.draw_directional_light(&self.light_1);
-        application.draw_directional_light(&self.light_2);
+    fn draw(&mut self, render_system: &mut RenderSystem) {
+        render_system.add_geometry(&mut self.teapot);
+        render_system.draw_ambient_light();
+        render_system.draw_directional_light(&self.light_1);
+        render_system.draw_directional_light(&self.light_2);
     }
 }

@@ -1,6 +1,6 @@
 use nalgebra_glm::{pi, vec3};
 
-use crate::render_system::{self, lighting::directional::DirectionalLight, model::Model};
+use crate::render_system::{lighting::directional::DirectionalLight, model::Model, RenderSystem};
 
 use super::Scene;
 
@@ -38,10 +38,29 @@ impl MonkeyScene {
 }
 
 impl Scene for MonkeyScene {
-    fn draw(&mut self, application: &mut render_system::RenderSystem) {
-        application.add_geometry(&mut self.suzanne);
-        application.draw_ambient_light();
-        application.draw_directional_light(&self.light_1);
-        application.draw_directional_light(&self.light_2);
+    fn draw(&mut self, render_system: &mut RenderSystem) {
+        //fn draw(&mut self, context: &mut SceneContext) {
+        // find the magnitude of 100hz
+        let fft_data = render_system.fft_container.read_fft(5);
+        let mut magnitude = match fft_data.len() {
+            0 => 0.0,
+            _ => fft_data[100 / 44100],
+        };
+
+        magnitude = map_range(magnitude, 0.0, 1.0, 1.0, 1.5);
+
+        log::info!("magnitude: {}", magnitude);
+
+        // scale the monkey
+        self.suzanne.scale(magnitude);
+
+        render_system.add_geometry(&mut self.suzanne);
+        render_system.draw_ambient_light();
+        render_system.draw_directional_light(&self.light_1);
+        render_system.draw_directional_light(&self.light_2);
     }
+}
+
+fn map_range(value: f32, from_min: f32, from_max: f32, to_min: f32, to_max: f32) -> f32 {
+    (value.min(from_max) - from_min) * (to_max - to_min) / (from_max - from_min) + to_min
 }

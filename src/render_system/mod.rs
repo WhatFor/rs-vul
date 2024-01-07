@@ -48,7 +48,6 @@ use vulkano::{
         GraphicsPipeline, Pipeline,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-    shader::ShaderModule,
     swapchain::{
         self, AcquireError, PresentMode, Surface, Swapchain, SwapchainAcquireFuture,
         SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo,
@@ -58,6 +57,7 @@ use vulkano::{
 };
 
 use crate::{
+    audio::fft::FFTContainer,
     render_system::lighting::{ambient::AmbientLight, directional::DirectionalLight},
     render_system::obj_loader::Vert,
     render_system::{model::Model, obj_loader::DummyVertex, vp::VP},
@@ -257,7 +257,7 @@ const TITLE: &str = "RS VUL";
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 
-const UNCAPPED_FPS: bool = true;
+const UNCAPPED_FPS: bool = false;
 
 const NEAR_CLIP: f32 = 0.01;
 const FAR_CLIP: f32 = 100.0;
@@ -265,6 +265,7 @@ const FAR_CLIP: f32 = 100.0;
 pub struct RenderSystem {
     pub constants: EngineConstants,
     pub render_stage: RenderStage,
+    pub fft_container: FFTContainer,
 
     instance: Arc<Instance>,
     window: Arc<Window>,
@@ -710,6 +711,7 @@ impl RenderSystem {
             vp_descriptor_set,
 
             constants,
+            fft_container: FFTContainer::new(),
 
             render_stage: Self::INITIAL_RENDER_STAGE,
             commands: None,

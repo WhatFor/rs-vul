@@ -100,6 +100,11 @@ impl Model {
         self.requires_update = true;
     }
 
+    pub fn scale(&mut self, scale: f32) {
+        self.uniform_scale = scale;
+        self.requires_update = true;
+    }
+
     /// Return the model's rotation to 0
     pub fn zero_rotation(&mut self) {
         self.rotation = identity();
