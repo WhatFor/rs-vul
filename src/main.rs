@@ -11,32 +11,42 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
 };
 
+use crate::midi::{MidiEvent, MidiEventType};
+
 pub mod audio;
+pub mod midi;
 pub mod render_system;
 pub mod scenes;
 pub mod shaders;
 
 const LIVE_AUDIO_OUT_L: &str = "Ableton Live 11 Suite:out1";
 const LIVE_AUDIO_OUT_R: &str = "Ableton Live 11 Suite:out2";
-
 const AUDIO_FFT_CHUNK_SIZE: usize = 512;
 
 fn main() {
     // Configure Logger
     fast_log::init(Config::new().console().chan_len(Some(100000))).unwrap();
 
-    // Build a Channel to send audio data from the JACK thread to the event_loop
+    // Build Channels to send audio data from the JACK thread to the event_loop
     let (av_sender, av_receiver) = std::sync::mpsc::channel();
+    let (midi_sender, midi_receiver) = std::sync::mpsc::channel();
 
     // Init Jack
     let (jack, status) = jack::Client::new("rs", ClientOptions::NO_START_SERVER).unwrap();
     log::info!("JACK client '{}', Status: {:?}", jack.name(), status);
 
-    let midi_in_1 = jack.register_port("midi_in_1", jack::MidiIn).unwrap();
     let in_port_audio_l = jack.register_port("audio_in_l", jack::AudioIn).unwrap();
     let in_port_audio_r = jack.register_port("audio_in_r", jack::AudioIn).unwrap();
-    let live_audio_out_l = jack.port_by_name(LIVE_AUDIO_OUT_L).unwrap();
-    let live_audio_out_r = jack.port_by_name(LIVE_AUDIO_OUT_R).unwrap();
+
+    let live_audio_out_l = jack
+        .port_by_name(LIVE_AUDIO_OUT_L)
+        .expect("Live audio out L not found. Try reselecting audio device in Ableton.");
+    let live_audio_out_r = jack
+        .port_by_name(LIVE_AUDIO_OUT_R)
+        .expect("Live audio out R not found. Try reselecting audio device in Ableton.");
+
+    let midi_in_1 = jack.register_port("midi_in_1", jack::MidiIn).unwrap();
+    let live_midi_loop_1 = jack.port_by_name("system_midi:capture_1").unwrap();
 
     // Init FFT
     let mut audio_1_fft_planner = FftPlanner::new();
@@ -67,30 +77,48 @@ fn main() {
             _client
                 .connect_ports(&live_audio_out_r, &in_port_audio_r)
                 .unwrap();
+            _client
+                .connect_ports(&live_midi_loop_1, &midi_in_1)
+                .unwrap();
             is_jack_connected = true;
         }
 
-        //let midi_in = midi_in_1.iter(ps);
+        let midi_in = midi_in_1.iter(ps);
 
-        // for raw_midi_event in midi_in {
-        //     match raw_midi_event {
-        //         jack::RawMidi { bytes, time } => {
-        //             if bytes.len() >= 3 {
-        //                 let status = bytes[0];
-        //                 let data1 = bytes[1];
-        //                 let data2 = bytes[2];
+        for raw_midi_event in midi_in {
+            match raw_midi_event {
+                jack::RawMidi { bytes, time: _ } => {
+                    if bytes.len() >= 3 {
+                        let status = bytes[0];
+                        let channel = status - if status >= 144 { 143 } else { 127 };
 
-        //                 if status == 144 {
-        //                     // Note on event
-        //                     println!("Note on: {} {}", data1, data2);
-        //                 } else if status == 128 {
-        //                     // Note off event
-        //                     println!("Note off: {}", data1);
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
+                        let event_type = if status >= 144 && status <= 159 {
+                            MidiEventType::NoteOn
+                        } else {
+                            MidiEventType::NoteOff
+                        };
+
+                        if channel > 16 {
+                            // For now, ignore MIDI events on channels > 16
+                            // as these are non-note events.
+                            continue;
+                        }
+
+                        let velocity = if event_type == MidiEventType::NoteOn {
+                            Some(bytes[2])
+                        } else {
+                            None
+                        };
+
+                        let midi_event = MidiEvent::new(event_type, channel, bytes[1], velocity);
+
+                        midi_sender
+                            .send(midi_event)
+                            .expect("Unable to send MIDI event");
+                    }
+                }
+            }
+        }
 
         let audio_in_l = in_port_audio_l.as_slice(ps);
 
@@ -124,6 +152,10 @@ fn main() {
     let event_loop = EventLoop::new();
     let mut scene_man = SceneManager::new();
     let (mut sys, mut previous_frame_end) = render_system::RenderSystem::new(&event_loop);
+
+    // Wire up Channels
+    sys.set_midi_channel(midi_receiver);
+    sys.set_audio_channel(av_receiver);
 
     // Add Scenes
     scene_man.add_scene(Box::new(MonkeyScene::new()));
@@ -189,14 +221,6 @@ fn main() {
             sys.start_frame();
 
             let active_scene = scene_man.active_scene();
-
-            // read the latest data from the channel
-            let mut data = vec![];
-            while let Ok(d) = av_receiver.try_recv() {
-                data = d;
-            }
-            sys.fft_container.set_fft(data);
-
             active_scene.draw(&mut sys);
 
             sys.finish_frame(&mut previous_frame_end);

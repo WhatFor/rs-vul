@@ -49,6 +49,8 @@ impl FFTContainer {
     }
 
     pub fn read_fft(&self, smoothing_amount: usize) -> Vec<f32> {
+        // TODO: Implement smoothing
+        let _ = smoothing_amount;
         // Read the buffers into the fft, smoothed
         self.fft_buffers
             .iter()

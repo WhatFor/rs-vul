@@ -7,7 +7,8 @@ use nalgebra_glm::{
 pub struct Model {
     data: Vec<Vert>,
     translation: TMat4<f32>,
-    // todo: Support 3d scale
+    velocity: TVec3<f32>,
+    forces: Vec<TVec3<f32>>,
     uniform_scale: f32,
     rotation: TMat4<f32>,
     model: TMat4<f32>,
@@ -37,6 +38,8 @@ impl ModelBuilder {
         Model {
             data: loader.as_normal_vertices(),
             translation: identity(),
+            velocity: vec3(0.0, 0.0, 0.0),
+            forces: Vec::new(),
             uniform_scale: self.scale_factor,
             rotation: identity(),
             model: identity(),
@@ -98,6 +101,41 @@ impl Model {
     pub fn translate(&mut self, v: TVec3<f32>) {
         self.translation = translate(&self.translation, &v);
         self.requires_update = true;
+    }
+
+    pub fn reset_translation(&mut self) {
+        self.translation = identity();
+        self.requires_update = true;
+    }
+
+    pub fn reset_velocity(&mut self) {
+        self.velocity = vec3(0.0, 0.0, 0.0);
+    }
+
+    pub fn set_velocity(&mut self, velocity: TVec3<f32>) {
+        self.velocity = velocity;
+    }
+
+    pub fn add_gravity(&mut self) {
+        self.add_force(vec3(0.0, 9.81, 0.0));
+    }
+
+    pub fn add_force(&mut self, force: TVec3<f32>) {
+        self.forces.push(force);
+        self.requires_update = true;
+    }
+
+    pub fn apply_forces(&mut self, delta_time: f32) {
+        let mut total_force = vec3(0.0, 0.0, 0.0);
+
+        for force in &self.forces {
+            total_force += force;
+        }
+
+        self.velocity += total_force * delta_time;
+
+        let translation = self.velocity * delta_time;
+        self.translate(translation);
     }
 
     pub fn scale(&mut self, scale: f32) {

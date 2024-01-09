@@ -267,6 +267,12 @@ pub struct RenderSystem {
     pub render_stage: RenderStage,
     pub fft_container: FFTContainer,
 
+    pub midi_channel: Option<std::sync::mpsc::Receiver<crate::midi::MidiEvent>>,
+    pub audio_channel: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+
+    pub frame_delta: f32,
+    frame_start: std::time::Instant,
+
     instance: Arc<Instance>,
     window: Arc<Window>,
     surface: Arc<Surface>,
@@ -712,14 +718,52 @@ impl RenderSystem {
 
             constants,
             fft_container: FFTContainer::new(),
+            midi_channel: None,
+            audio_channel: None,
 
             render_stage: Self::INITIAL_RENDER_STAGE,
             commands: None,
             current_image_index: 0,
             acquire_future: None,
+
+            frame_delta: 0.0,
+            frame_start: std::time::Instant::now(),
         };
 
         (rs, previous_frame_end)
+    }
+
+    ///
+    /// Set the MIDI channel to be used by the RenderSystem.
+    ///
+    pub fn set_midi_channel(
+        &mut self,
+        midi_channel: std::sync::mpsc::Receiver<crate::midi::MidiEvent>,
+    ) {
+        self.midi_channel = Some(midi_channel);
+    }
+
+    ///
+    /// Set the Audio channel to be used by the RenderSystem.
+    ///
+    pub fn set_audio_channel(&mut self, audio_channel: std::sync::mpsc::Receiver<Vec<f32>>) {
+        self.audio_channel = Some(audio_channel);
+    }
+
+    ///
+    /// Given an audio_channel, read the data from it and set the FFTContainer.
+    ///
+    pub fn read_audio(&mut self) {
+        match &self.audio_channel {
+            Some(c) => {
+                let mut data = vec![];
+                while let Ok(d) = c.try_recv() {
+                    data = d;
+                }
+                self.fft_container.set_fft(data);
+            }
+            None => {}
+        };
     }
 
     ///
@@ -823,6 +867,9 @@ impl RenderSystem {
     }
 
     pub fn start_frame(&mut self) {
+        self.frame_delta = self.frame_start.elapsed().as_secs_f32();
+        self.frame_start = std::time::Instant::now();
+
         match self.render_stage {
             RenderStage::Stopped => {
                 self.render_stage = RenderStage::Deferred;

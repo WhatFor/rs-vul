@@ -1,6 +1,9 @@
 use nalgebra_glm::{pi, vec3};
 
-use crate::render_system::{lighting::directional::DirectionalLight, model::Model, RenderSystem};
+use crate::{
+    midi::MidiEventType,
+    render_system::{lighting::directional::DirectionalLight, model::Model, RenderSystem},
+};
 
 use super::Scene;
 
@@ -16,6 +19,8 @@ impl MonkeyScene {
             .invert_winding_order(true)
             .build();
 
+        suzanne.add_gravity();
+        suzanne.set_velocity(vec3(0.0, -5.0, 0.0));
         suzanne.translate(vec3(0.0, 0.0, -3.0));
         suzanne.rotate(pi(), vec3(0.0, 1.0, 0.0));
 
@@ -39,8 +44,7 @@ impl MonkeyScene {
 
 impl Scene for MonkeyScene {
     fn draw(&mut self, render_system: &mut RenderSystem) {
-        //fn draw(&mut self, context: &mut SceneContext) {
-        // find the magnitude of 100hz
+        render_system.read_audio();
         let fft_data = render_system.fft_container.read_fft(5);
         let mut magnitude = match fft_data.len() {
             0 => 0.0,
@@ -48,11 +52,28 @@ impl Scene for MonkeyScene {
         };
 
         magnitude = map_range(magnitude, 0.0, 1.0, 1.0, 1.5);
-
-        log::info!("magnitude: {}", magnitude);
-
-        // scale the monkey
         self.suzanne.scale(magnitude);
+
+        match &render_system.midi_channel {
+            Some(channel) => {
+                let midi_data = channel.try_recv();
+
+                match midi_data {
+                    Ok(data) => {
+                        if data.event_type == MidiEventType::NoteOn {
+                            self.suzanne.reset_translation();
+                            self.suzanne.reset_velocity();
+                            self.suzanne.set_velocity(vec3(0.0, -5.0, 0.0));
+                            self.suzanne.translate(vec3(0.0, 0.0, -3.0));
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            None => {}
+        };
+
+        self.suzanne.apply_forces(render_system.frame_delta);
 
         render_system.add_geometry(&mut self.suzanne);
         render_system.draw_ambient_light();
